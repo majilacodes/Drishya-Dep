@@ -1,0 +1,9 @@
+streamlit
+torch
+torchvision
+opencv-python
+numpy
+matplotlib
+supervision==0.23.0
+git+https://github.com/facebookresearch/segment-anything.git
+Pillow
