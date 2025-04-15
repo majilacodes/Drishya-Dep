@@ -10,7 +10,6 @@ from segment_anything import sam_model_registry, SamPredictor
 import matplotlib.pyplot as plt
 
 
-# Set page configuration
 st.set_page_config(
     page_title="Drishya",
     page_icon="🖼️",
@@ -23,7 +22,7 @@ def show_mask(ax, mask, random_color=False):
     if random_color:
         color = np.concatenate([np.random.random(3), np.array([0.6])], axis=0)
     else:
-        color = np.array([30/255, 144/255, 255/255, 0.6])  # Dodger blue with transparency
+        color = np.array([30/255, 144/255, 255/255, 0.6]) 
     h, w = mask.shape[-2:]
     mask_image = mask.reshape(h, w, 1) * color.reshape(1, 1, -1)
     ax.imshow(mask_image)
@@ -47,7 +46,7 @@ def replace_product_in_image(ad_image, new_product, mask):
     """
     # Ensure mask is binary
     if len(mask.shape) > 2:
-        mask = mask[:, :, 0]  # Take first channel if it's not already 2D
+        mask = mask[:, :, 0]
     binary_mask = (mask > 128).astype(np.uint8)
     
     # Get bounding box from mask
@@ -59,45 +58,123 @@ def replace_product_in_image(ad_image, new_product, mask):
     y_min, y_max = y_indices.min(), y_indices.max()
     x_min, x_max = x_indices.min(), x_indices.max()
     
-    # Calculate dimensions
+    # Calculate dimensions of the mask area
     target_height = y_max - y_min + 1
     target_width = x_max - x_min + 1
-    
-    # Resize new product image to fit the bounding box
-    # Handle transparencies in new_product if it has an alpha channel
-    if new_product.shape[2] == 4:  # RGBA
-        # Create a white background
-        background = np.ones((new_product.shape[0], new_product.shape[1], 3), dtype=np.uint8) * 255
-        # Extract alpha channel
-        alpha = new_product[:, :, 3] / 255.0
-        # Expand alpha to 3 channels
-        alpha_3channel = np.stack([alpha, alpha, alpha], axis=2)
-        # Extract RGB channels
-        rgb = new_product[:, :, :3]
-        # Blend RGB with white background using alpha
-        new_product_rgb = (rgb * alpha_3channel + background * (1 - alpha_3channel)).astype(np.uint8)
-        new_product = new_product_rgb
-
-    # Resize the product image to match the target dimensions
-    resized_product = cv2.resize(new_product, (target_width, target_height))
     
     # Create output image
     output = ad_image.copy()
     
-    # Create a mask for the target region
-    roi_mask = binary_mask[y_min:y_max+1, x_min:x_max+1]
-    
-    # Expand mask to 3 channels for color image blending
-    roi_mask_3ch = np.stack([roi_mask, roi_mask, roi_mask], axis=2)
-    
-    # Get the region of interest in the output image
-    roi = output[y_min:y_max+1, x_min:x_max+1]
-    
-    # Blend the new product with the region of interest using the mask
-    blended_roi = roi * (1 - roi_mask_3ch) + resized_product * roi_mask_3ch
-    
-    # Place the blended region back into the output image
-    output[y_min:y_max+1, x_min:x_max+1] = blended_roi
+    # Handle transparent images (RGBA)
+    if new_product.shape[2] == 4:
+        # Extract alpha channel and RGB channels
+        alpha = new_product[:, :, 3] / 255.0
+        rgb = new_product[:, :, :3]
+        
+        # Calculate the original product aspect ratio
+        orig_height, orig_width = new_product.shape[:2]
+        orig_aspect_ratio = orig_width / orig_height
+        mask_aspect_ratio = target_width / target_height
+        
+        # Determine the resize approach to ensure product fills the entire mask
+        if orig_aspect_ratio > mask_aspect_ratio:
+            # Product is wider than mask - match height and crop width
+            resize_height = target_height
+            resize_width = int(resize_height * orig_aspect_ratio)
+            offset_x = (resize_width - target_width) // 2
+            offset_y = 0
+        else:
+            # Product is taller than mask - match width and crop height
+            resize_width = target_width
+            resize_height = int(resize_width / orig_aspect_ratio)
+            offset_x = 0
+            offset_y = (resize_height - target_height) // 2
+        
+        # Resize both RGB and alpha to the calculated dimensions
+        resized_rgb = cv2.resize(rgb, (resize_width, resize_height))
+        resized_alpha = cv2.resize(alpha, (resize_width, resize_height))
+        
+        # Crop the resized image to fit the mask dimensions
+        if resize_width >= target_width and resize_height >= target_height:
+            cropped_rgb = resized_rgb[offset_y:offset_y + target_height, offset_x:offset_x + target_width]
+            cropped_alpha = resized_alpha[offset_y:offset_y + target_height, offset_x:offset_x + target_width]
+        else:
+            # In case the resized image is somehow smaller than target (shouldn't happen)
+            # Create padding around the product to fill the entire mask
+            cropped_rgb = np.zeros((target_height, target_width, 3), dtype=np.uint8)
+            cropped_alpha = np.zeros((target_height, target_width), dtype=np.float32)
+            
+            paste_y = max(0, (target_height - resize_height) // 2)
+            paste_x = max(0, (target_width - resize_width) // 2)
+            
+            paste_height = min(resize_height, target_height)
+            paste_width = min(resize_width, target_width)
+            
+            cropped_rgb[paste_y:paste_y + paste_height, paste_x:paste_x + paste_width] = resized_rgb[:paste_height, :paste_width]
+            cropped_alpha[paste_y:paste_y + paste_height, paste_x:paste_x + paste_width] = resized_alpha[:paste_height, :paste_width]
+        
+        # Create 3-channel alpha for blending
+        cropped_alpha_3ch = np.stack([cropped_alpha, cropped_alpha, cropped_alpha], axis=2)
+        
+        # Get the region of interest in the output image
+        roi = output[y_min:y_max+1, x_min:x_max+1]
+        
+        # Apply mask to restrict alpha blending only to the segmented region
+        mask_region = binary_mask[y_min:y_max+1, x_min:x_max+1]
+        mask_region_3ch = np.stack([mask_region, mask_region, mask_region], axis=2)
+        
+        # Combine mask with alpha for precise blending
+        combined_alpha = cropped_alpha_3ch * mask_region_3ch
+        
+        # Blend using the combined alpha
+        blended_roi = roi * (1 - combined_alpha) + cropped_rgb * combined_alpha
+        
+        # Place the blended region back into the output image
+        output[y_min:y_max+1, x_min:x_max+1] = blended_roi
+    else:
+        # For non-transparent images, use a similar approach
+        orig_height, orig_width = new_product.shape[:2]
+        orig_aspect_ratio = orig_width / orig_height
+        mask_aspect_ratio = target_width / target_height
+        
+        if orig_aspect_ratio > mask_aspect_ratio:
+            resize_height = target_height
+            resize_width = int(resize_height * orig_aspect_ratio)
+            offset_x = (resize_width - target_width) // 2
+            offset_y = 0
+        else:
+            resize_width = target_width
+            resize_height = int(resize_width / orig_aspect_ratio)
+            offset_x = 0
+            offset_y = (resize_height - target_height) // 2
+        
+        # Resize the product image
+        resized_product = cv2.resize(new_product, (resize_width, resize_height))
+        
+        # Crop to fit the mask dimensions
+        if resize_width >= target_width and resize_height >= target_height:
+            cropped_product = resized_product[offset_y:offset_y + target_height, offset_x:offset_x + target_width]
+        else:
+            # Handle edge case with padding
+            cropped_product = np.zeros((target_height, target_width, 3), dtype=np.uint8)
+            paste_y = max(0, (target_height - resize_height) // 2)
+            paste_x = max(0, (target_width - resize_width) // 2)
+            paste_height = min(resize_height, target_height)
+            paste_width = min(resize_width, target_width)
+            cropped_product[paste_y:paste_y + paste_height, paste_x:paste_x + paste_width] = resized_product[:paste_height, :paste_width]
+        
+        # Create a mask for the target region
+        roi_mask = binary_mask[y_min:y_max+1, x_min:x_max+1]
+        roi_mask_3ch = np.stack([roi_mask, roi_mask, roi_mask], axis=2)
+        
+        # Get the region of interest in the output image
+        roi = output[y_min:y_max+1, x_min:x_max+1]
+        
+        # Blend the new product with the region of interest using the mask
+        blended_roi = roi * (1 - roi_mask_3ch) + cropped_product * roi_mask_3ch
+        
+        # Place the blended region back into the output image
+        output[y_min:y_max+1, x_min:x_max+1] = blended_roi
     
     return output
 
