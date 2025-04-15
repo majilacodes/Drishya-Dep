@@ -230,8 +230,8 @@ if 'binary_mask' not in st.session_state:
     st.session_state.binary_mask = None
 
 # Upload an image
-st.sidebar.header("Upload Images")
-uploaded_ad_file = st.sidebar.file_uploader("Upload Advertisement Image", type=["jpg", "jpeg", "png"], key="ad_image")
+st.sidebar.header("Upload Image")
+uploaded_ad_file = st.sidebar.file_uploader("Upload 4o Generated Image Here", type=["jpg", "jpeg", "png"], key="ad_image")
 
 if uploaded_ad_file is not None:
     # Read the image
@@ -258,13 +258,13 @@ if uploaded_ad_file is not None:
     # Bounding box inputs
     with col1:
         st.subheader("X-axis Controls")
-        x_min = st.slider("X Min", 0, width-1, int(width * 0.25))
-        x_max = st.slider("X Max", x_min+1, width, int(width * 0.75))
+        x_min = st.slider("X Min", 0, width-1, 200)
+        x_max = st.slider("X Max", x_min+1, width, 800)
     
     with col2:
         st.subheader("Y-axis Controls")
-        y_min = st.slider("Y Min", 0, height-1, int(height * 0.25))
-        y_max = st.slider("Y Max", y_min+1, height, int(height * 0.75))
+        y_min = st.slider("Y Min", 0, height-1, 200)
+        y_max = st.slider("Y Max", y_min+1, height, 800)
     
     # Convert the image to RGB for SAM
     image_rgb = cv2.cvtColor(image_np, cv2.COLOR_BGR2RGB) if len(image_np.shape) == 3 else cv2.cvtColor(image_np, cv2.COLOR_GRAY2RGB)
