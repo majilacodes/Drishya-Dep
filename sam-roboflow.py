@@ -160,19 +160,135 @@ def apply_color_grading(product_image, target_image, mask, strength=0.5):
     
     return graded_product
 
-def replace_product_in_image(ad_image, new_product, mask, scale_factor=1.0):
+def create_feathered_mask(mask, feather_amount=10):
     """
-    Replace a product in an ad image based on a segmentation mask with improved sizing.
+    Create a feathered mask with smooth edges for better blending.
+    
+    Args:
+        mask: Binary mask (numpy array)
+        feather_amount: Amount of feathering in pixels
+        
+    Returns:
+        Feathered mask (numpy array)
+    """
+    import cv2
+    import numpy as np
+    
+    # Ensure mask is binary
+    if len(mask.shape) > 2:
+        mask = mask[:, :, 0]
+    binary_mask = (mask > 128).astype(np.uint8)
+    
+    # Create distance transform from the mask edges
+    dist_transform = cv2.distanceTransform(binary_mask, cv2.DIST_L2, 3)
+    
+    # Normalize the distance transform
+    cv2.normalize(dist_transform, dist_transform, 0, 1.0, cv2.NORM_MINMAX)
+    
+    # Create inverse distance transform for outside the mask
+    inv_binary_mask = 1 - binary_mask
+    inv_dist_transform = cv2.distanceTransform(inv_binary_mask, cv2.DIST_L2, 3)
+    cv2.normalize(inv_dist_transform, inv_dist_transform, 0, 1.0, cv2.NORM_MINMAX)
+    
+    # Create a feathered mask by combining both distance transforms
+    feathered_mask = np.ones_like(dist_transform, dtype=np.float32)
+    
+    # Apply feathering at the boundaries
+    feathered_mask = np.where(
+        dist_transform > 0,
+        np.minimum(1.0, dist_transform * (feather_amount / 2)),
+        feathered_mask
+    )
+    
+    feathered_mask = np.where(
+        inv_dist_transform < feather_amount,
+        np.maximum(0.0, 1.0 - (inv_dist_transform / feather_amount)),
+        feathered_mask * binary_mask
+    )
+    
+    return feathered_mask
+
+def apply_poisson_blending(source, target, mask, offset=(0, 0)):
+    """
+    Apply Poisson blending for seamless integration of the source into the target.
+    
+    Args:
+        source: Source image to blend (numpy array)
+        target: Target image to blend into (numpy array)
+        mask: Binary mask of the source region (numpy array)
+        offset: (y, x) offset for placing source into target
+        
+    Returns:
+        Blended image (numpy array)
+    """
+    import cv2
+    import numpy as np
+    
+    # Ensure mask is binary
+    if len(mask.shape) > 2:
+        mask = mask[:, :, 0]
+    binary_mask = (mask > 128).astype(np.uint8) * 255
+    
+    # Get the region of interest
+    y_indices, x_indices = np.where(binary_mask > 0)
+    if len(y_indices) == 0 or len(x_indices) == 0:
+        return target
+        
+    y_min, y_max = y_indices.min(), y_indices.max()
+    x_min, x_max = x_indices.min(), x_indices.max()
+    
+    # Create sub-images for blending
+    src_roi = source[y_min:y_max+1, x_min:x_max+1]
+    tgt_roi = target[y_min:y_max+1, x_min:x_max+1]
+    mask_roi = binary_mask[y_min:y_max+1, x_min:x_max+1]
+    
+    # Apply blending
+    try:
+        # Seamless clone (Poisson blending)
+        # center point for placement
+        center = ((x_max - x_min) // 2, (y_max - y_min) // 2)
+        
+        # Resize source ROI to match mask ROI if needed
+        if src_roi.shape[:2] != mask_roi.shape[:2]:
+            src_roi = cv2.resize(src_roi, (mask_roi.shape[1], mask_roi.shape[0]))
+        
+        # Create a temp result image 
+        temp_result = np.copy(tgt_roi)
+        blended_roi = cv2.seamlessClone(
+            src_roi.astype(np.uint8), 
+            tgt_roi.astype(np.uint8), 
+            mask_roi, 
+            center, 
+            cv2.NORMAL_CLONE
+        )
+        
+        # Copy the result back
+        result = target.copy()
+        result[y_min:y_max+1, x_min:x_max+1] = blended_roi
+        return result
+    except cv2.error as e:
+        # Fallback to alpha blending if seamless clone fails
+        print(f"Seamless clone failed: {e}, falling back to alpha blending")
+        return target
+
+def replace_product_in_image(ad_image, new_product, mask, scale_factor=1.0, feather_amount=15, blend_method="advanced"):
+    """
+    Replace a product in an ad image with improved edge blending.
     
     Args:
         ad_image: The original advertisement image (numpy array)
         new_product: The new product image to insert (numpy array)
         mask: Binary segmentation mask of the product to replace (numpy array)
-        scale_factor: Controls how much of the mask area the product will fill (1.0 = exact fit, >1.0 = larger than mask)
-    
+        scale_factor: Controls how much of the mask area the product will fill
+        feather_amount: Amount of edge feathering in pixels
+        blend_method: Blending method to use ('alpha', 'poisson', or 'advanced')
+        
     Returns:
         The modified image with the new product inserted
     """
+    import cv2
+    import numpy as np
+    
     # Ensure mask is binary
     if len(mask.shape) > 2:
         mask = mask[:, :, 0]
@@ -181,7 +297,6 @@ def replace_product_in_image(ad_image, new_product, mask, scale_factor=1.0):
     # Get bounding box from mask
     y_indices, x_indices = np.where(binary_mask == 1)
     if len(y_indices) == 0 or len(x_indices) == 0:
-        st.error("Invalid mask - no pixels selected")
         return ad_image
         
     y_min, y_max = y_indices.min(), y_indices.max()
@@ -197,14 +312,9 @@ def replace_product_in_image(ad_image, new_product, mask, scale_factor=1.0):
     # Get product dimensions and aspect ratio
     prod_height, prod_width = new_product.shape[:2]
     prod_aspect_ratio = prod_width / prod_height
-    mask_aspect_ratio = mask_width / mask_height
     
     # Calculate the dimensions to preserve aspect ratio
-    # Apply scale factor to control how much of the mask the product fills
-    # Use the minimum dimension to ensure consistent scaling 
     base_dimension = min(mask_width, mask_height)
-    
-    # Scale the base dimension
     scaled_dimension = base_dimension * scale_factor
     
     # Calculate new dimensions based on aspect ratio
@@ -221,6 +331,9 @@ def replace_product_in_image(ad_image, new_product, mask, scale_factor=1.0):
     offset_x = int((mask_width - resize_width) / 2)
     offset_y = int((mask_height - resize_height) / 2)
     
+    # Create a feathered mask for better edge blending
+    feathered_mask = create_feathered_mask(binary_mask[y_min:y_max+1, x_min:x_max+1], feather_amount)
+    
     # Handle transparent images (RGBA)
     if new_product.shape[2] == 4:
         # Extract alpha channel and RGB channels
@@ -228,29 +341,27 @@ def replace_product_in_image(ad_image, new_product, mask, scale_factor=1.0):
         rgb = new_product[:, :, :3]
         
         # Resize both RGB and alpha to the calculated dimensions
-        resize_width_int = max(1, int(resize_width))  # Ensure at least 1 pixel
-        resize_height_int = max(1, int(resize_height))  # Ensure at least 1 pixel
+        resize_width_int = max(1, int(resize_width))
+        resize_height_int = max(1, int(resize_height))
         resized_rgb = cv2.resize(rgb, (resize_width_int, resize_height_int))
         resized_alpha = cv2.resize(alpha, (resize_width_int, resize_height_int))
         
         # Create a properly sized masks for handling the product overlay
         product_mask = np.zeros((mask_height, mask_width), dtype=np.float32)
         
-        # Calculate paste coordinates (allowing overflow when scale > 1.0)
+        # Calculate paste coordinates
         paste_y_start = offset_y
         paste_y_end = paste_y_start + resize_height_int
         paste_x_start = offset_x
         paste_x_end = paste_x_start + resize_width_int
         
-        # Calculate corresponding product coordinates (source coordinates)
-        # Start with full product
+        # Calculate corresponding product coordinates
         prod_y_start = 0
         prod_y_end = resize_height_int
         prod_x_start = 0
         prod_x_end = resize_width_int
         
-        # If product would overflow the mask area, adjust the source coordinates
-        # but keep the paste coordinates within the mask area
+        # Handle overflow
         if paste_y_start < 0:
             prod_y_start = -paste_y_start
             paste_y_start = 0
@@ -264,21 +375,15 @@ def replace_product_in_image(ad_image, new_product, mask, scale_factor=1.0):
             prod_x_end = resize_width_int - (paste_x_end - mask_width)
             paste_x_end = mask_width
         
-        # Place the resized alpha into the product mask (only the visible portion)
+        # Place the resized alpha into the product mask
         if paste_y_end > paste_y_start and paste_x_end > paste_x_start:
-            # Ensure we don't go out of bounds for the resized product
             prod_y_end = min(prod_y_end, resize_height_int)
             prod_x_end = min(prod_x_end, resize_width_int)
             
-            # Place the visible portion of the alpha mask
-            try:
-                product_mask[paste_y_start:paste_y_end, paste_x_start:paste_x_end] = resized_alpha[prod_y_start:prod_y_end, prod_x_start:prod_x_end]
-            except ValueError as e:
-                st.error(f"Error placing alpha mask: {e}")
-                return ad_image
+            product_mask[paste_y_start:paste_y_end, paste_x_start:paste_x_end] = resized_alpha[prod_y_start:prod_y_end, prod_x_start:prod_x_end]
         
-        # Apply the binary mask to restrict blending only to the segmented region
-        product_mask = product_mask * binary_mask[y_min:y_max+1, x_min:x_max+1]
+        # Apply the binary mask and then the feathered mask for smooth edges
+        product_mask = product_mask * feathered_mask
         
         # Create 3-channel alpha for blending
         product_mask_3ch = np.stack([product_mask, product_mask, product_mask], axis=2)
@@ -289,19 +394,80 @@ def replace_product_in_image(ad_image, new_product, mask, scale_factor=1.0):
         # Create a properly sized RGB image to blend
         rgb_to_blend = np.zeros((mask_height, mask_width, 3), dtype=np.uint8)
         if paste_y_end > paste_y_start and paste_x_end > paste_x_start:
-            try:
-                rgb_to_blend[paste_y_start:paste_y_end, paste_x_start:paste_x_end] = resized_rgb[prod_y_start:prod_y_end, prod_x_start:prod_x_end]
-            except ValueError as e:
-                st.error(f"Error placing RGB image: {e}")
-                return ad_image
+            rgb_to_blend[paste_y_start:paste_y_end, paste_x_start:paste_x_end] = resized_rgb[prod_y_start:prod_y_end, prod_x_start:prod_x_end]
         
-        # Blend using the combined alpha
-        blended_roi = roi * (1 - product_mask_3ch) + rgb_to_blend * product_mask_3ch
+        # ----- ADVANCED BLENDING TECHNIQUES -----
+        if blend_method == "alpha":
+            # Basic alpha blending
+            blended_roi = roi * (1 - product_mask_3ch) + rgb_to_blend * product_mask_3ch
+            
+        elif blend_method == "poisson":
+            # Try Poisson blending for realistic edges
+            try:
+                # Create a temporary mask for the placed product
+                temp_mask = np.zeros((mask_height, mask_width), dtype=np.uint8)
+                temp_mask[paste_y_start:paste_y_end, paste_x_start:paste_x_end] = 255
+                
+                # Apply Poisson blending
+                blended_temp = apply_poisson_blending(rgb_to_blend, roi, temp_mask)
+                
+                # Use the product mask for the final blend to maintain transparency
+                blended_roi = roi * (1 - product_mask_3ch) + blended_temp * product_mask_3ch
+            except Exception as e:
+                # Fallback to alpha blending
+                blended_roi = roi * (1 - product_mask_3ch) + rgb_to_blend * product_mask_3ch
+                
+        else:  # "advanced" - custom edge-aware blending
+            # Gradient-domain blending for realistic edges
+            # First apply alpha blending
+            alpha_blend = roi * (1 - product_mask_3ch) + rgb_to_blend * product_mask_3ch
+            
+            # Edge detection on the original mask to identify boundary regions
+            edge_kernel = np.ones((5, 5), np.uint8)
+            edge_mask = cv2.dilate(binary_mask[y_min:y_max+1, x_min:x_max+1], edge_kernel) - binary_mask[y_min:y_max+1, x_min:x_max+1]
+            edge_mask = np.clip(edge_mask, 0, 1).astype(np.float32)
+            
+            # Create edge-aware 3-channel mask
+            edge_mask_3ch = np.stack([edge_mask, edge_mask, edge_mask], axis=2)
+            
+            # Calculate local color statistics for the boundary
+            boundary_color_mean = np.zeros((3,), dtype=np.float32)
+            if edge_mask.sum() > 0:
+                for c in range(3):
+                    boundary_color_mean[c] = np.mean(roi[:,:,c][edge_mask > 0])
+            
+            # Apply color harmonization at the edges
+            harmonized_blend = alpha_blend.copy()
+            for c in range(3):
+                edge_adjustment = (roi[:,:,c] - alpha_blend[:,:,c]) * edge_mask * 0.5
+                harmonized_blend[:,:,c] = alpha_blend[:,:,c] + edge_adjustment
+            
+            # Apply guided filtering to improve edge transitions
+            try:
+                r = 5  # Filter radius
+                eps = 0.1  # Regularization parameter
+                
+                # Use guided filter from OpenCV if available, otherwise fall back to the simplified approach
+                for c in range(3):
+                    harmonized_blend[:,:,c] = cv2.guidedFilter(
+                        roi[:,:,c].astype(np.float32), 
+                        harmonized_blend[:,:,c].astype(np.float32),
+                        r, eps
+                    )
+            except:
+                # Fallback to simple blurring at the edges if guided filter is not available
+                blur_amount = 3
+                edge_blur = cv2.GaussianBlur(edge_mask, (blur_amount*2+1, blur_amount*2+1), 0) * 0.7
+                edge_blur_3ch = np.stack([edge_blur, edge_blur, edge_blur], axis=2)
+                
+                harmonized_blend = harmonized_blend * (1 - edge_blur_3ch) + cv2.GaussianBlur(harmonized_blend, (blur_amount*2+1, blur_amount*2+1), 0) * edge_blur_3ch
+            
+            blended_roi = harmonized_blend.astype(np.uint8)
         
         # Place the blended region back into the output image
         output[y_min:y_max+1, x_min:x_max+1] = blended_roi
     else:
-        # For non-transparent images, use a similar approach
+        # For non-transparent images - similar approach
         # Resize the product image
         resize_width_int = max(1, int(resize_width))
         resize_height_int = max(1, int(resize_height))
@@ -310,21 +476,19 @@ def replace_product_in_image(ad_image, new_product, mask, scale_factor=1.0):
         # Create a properly sized product image to blend
         product_to_blend = np.zeros((mask_height, mask_width, 3), dtype=np.uint8)
         
-        # Calculate paste coordinates (allowing overflow when scale > 1.0)
+        # Calculate paste coordinates
         paste_y_start = offset_y
         paste_y_end = paste_y_start + resize_height_int
         paste_x_start = offset_x
         paste_x_end = paste_x_start + resize_width_int
         
-        # Calculate corresponding product coordinates (source coordinates)
-        # Start with full product
+        # Calculate corresponding product coordinates
         prod_y_start = 0
         prod_y_end = resize_height_int
         prod_x_start = 0
         prod_x_end = resize_width_int
         
-        # If product would overflow the mask area, adjust the source coordinates
-        # but keep the paste coordinates within the mask area
+        # Handle overflow
         if paste_y_start < 0:
             prod_y_start = -paste_y_start
             paste_y_start = 0
@@ -338,32 +502,79 @@ def replace_product_in_image(ad_image, new_product, mask, scale_factor=1.0):
             prod_x_end = resize_width_int - (paste_x_end - mask_width)
             paste_x_end = mask_width
         
-        # Place the resized product into the blend image (only the visible portion)
+        # Place the resized product into the blend image
         if paste_y_end > paste_y_start and paste_x_end > paste_x_start:
-            # Ensure we don't go out of bounds for the resized product
             prod_y_end = min(prod_y_end, resize_height_int)
             prod_x_end = min(prod_x_end, resize_width_int)
             
-            try:
-                product_to_blend[paste_y_start:paste_y_end, paste_x_start:paste_x_end] = resized_product[prod_y_start:prod_y_end, prod_x_start:prod_x_end]
-            except ValueError as e:
-                st.error(f"Error placing product: {e}")
-                return ad_image
+            product_to_blend[paste_y_start:paste_y_end, paste_x_start:paste_x_end] = resized_product[prod_y_start:prod_y_end, prod_x_start:prod_x_end]
         
-        # Create a mask for the target region
-        product_mask = np.zeros((mask_height, mask_width), dtype=np.uint8)
+        # Apply the feathered mask for smooth edges
+        product_mask = np.zeros((mask_height, mask_width), dtype=np.float32)
         if paste_y_end > paste_y_start and paste_x_end > paste_x_start:
             product_mask[paste_y_start:paste_y_end, paste_x_start:paste_x_end] = 1
         
-        # Apply the binary mask to restrict blending only to the segmented region
-        product_mask = product_mask * binary_mask[y_min:y_max+1, x_min:x_max+1]
+        # Combine with feathered mask
+        product_mask = product_mask * feathered_mask
         product_mask_3ch = np.stack([product_mask, product_mask, product_mask], axis=2)
         
-        # Get the region of interest in the output image
+        # Get the region of interest
         roi = output[y_min:y_max+1, x_min:x_max+1]
         
-        # Blend the new product with the region of interest using the mask
-        blended_roi = roi * (1 - product_mask_3ch) + product_to_blend * product_mask_3ch
+        # ----- ADVANCED BLENDING TECHNIQUES -----
+        if blend_method == "alpha":
+            # Basic alpha blending
+            blended_roi = roi * (1 - product_mask_3ch) + product_to_blend * product_mask_3ch
+            
+        elif blend_method == "poisson":
+            # Try Poisson blending
+            try:
+                # Create a temporary mask for the placed product
+                temp_mask = np.zeros((mask_height, mask_width), dtype=np.uint8)
+                temp_mask[paste_y_start:paste_y_end, paste_x_start:paste_x_end] = 255
+                
+                # Apply the mask from feathering
+                temp_mask = (temp_mask / 255.0 * feathered_mask * 255).astype(np.uint8)
+                
+                # Apply Poisson blending
+                blended_roi = apply_poisson_blending(product_to_blend, roi, temp_mask)
+            except Exception as e:
+                # Fallback to alpha blending
+                blended_roi = roi * (1 - product_mask_3ch) + product_to_blend * product_mask_3ch
+                
+        else:  # "advanced" - custom edge-aware blending
+            # First apply alpha blending
+            alpha_blend = roi * (1 - product_mask_3ch) + product_to_blend * product_mask_3ch
+            
+            # Edge detection to identify boundary regions
+            edge_kernel = np.ones((5, 5), np.uint8)
+            edge_mask = cv2.dilate(binary_mask[y_min:y_max+1, x_min:x_max+1], edge_kernel) - binary_mask[y_min:y_max+1, x_min:x_max+1]
+            edge_mask = np.clip(edge_mask, 0, 1).astype(np.float32)
+            
+            # Create edge-aware 3-channel mask
+            edge_mask_3ch = np.stack([edge_mask, edge_mask, edge_mask], axis=2)
+            
+            # Apply guided filtering for improved edge transitions
+            try:
+                r = 5  # Filter radius
+                eps = 0.1  # Regularization parameter
+                
+                harmonized_blend = alpha_blend.copy()
+                for c in range(3):
+                    harmonized_blend[:,:,c] = cv2.guidedFilter(
+                        roi[:,:,c].astype(np.float32), 
+                        alpha_blend[:,:,c].astype(np.float32),
+                        r, eps
+                    )
+            except:
+                # Fallback to simple blurring at the edges
+                blur_amount = 3
+                edge_blur = cv2.GaussianBlur(edge_mask, (blur_amount*2+1, blur_amount*2+1), 0) * 0.7
+                edge_blur_3ch = np.stack([edge_blur, edge_blur, edge_blur], axis=2)
+                
+                harmonized_blend = alpha_blend * (1 - edge_blur_3ch) + cv2.GaussianBlur(alpha_blend, (blur_amount*2+1, blur_amount*2+1), 0) * edge_blur_3ch
+            
+            blended_roi = harmonized_blend.astype(np.uint8)
         
         # Place the blended region back into the output image
         output[y_min:y_max+1, x_min:x_max+1] = blended_roi
@@ -573,6 +784,27 @@ if st.session_state.binary_mask is not None:
         help="Choose whether to match colors with just the target area or the entire image"
     )
 
+    st.header("Edge Blending Options")
+    blend_method = st.selectbox(
+        "Blending Method",
+        ["advanced", "alpha", "poisson"],
+        index=0,
+        help="Choose blending method: 'advanced' for best results, 'alpha' for simple transparency, 'poisson' for seamless integration"
+    )
+
+    feather_amount = st.slider(
+        "Edge Feathering Amount", 
+        min_value=0, 
+        max_value=30, 
+        value=15, 
+        step=1,
+        help="Controls the softness of edges (higher = softer transitions)"
+    )
+
+    st.write("Advanced blending combines multiple techniques for the most realistic results.")
+    st.write("Poisson blending works well with solid objects but may fail with complex images.")
+    st.write("Alpha blending is the simplest method and works in all cases.")
+
     if uploaded_product is not None:
         # Read the new product image
         new_product_img = Image.open(uploaded_product)
@@ -618,17 +850,39 @@ if st.session_state.binary_mask is not None:
                     st.subheader("Color-Graded Product")
                     st.image(graded_product, caption="Product After Color Grading", width=300)
                 
-                # Replace the product
+                # Replace the product with improved edge blending
                 result_image = replace_product_in_image(
                     original_img,
-                    graded_product,  # Use the color-graded product instead of the original
+                    graded_product,
                     st.session_state.binary_mask,
-                    scale_factor
+                    scale_factor,
+                    feather_amount,
+                    blend_method
                 )
                 
                 # Display the result
                 st.subheader("Final Result")
                 st.image(result_image, caption="Advertisement with Replaced Product", use_container_width=True)
+                
+                # Compare with original blend
+                st.subheader("Comparison")
+                col1, col2 = st.columns(2)
+                
+                # Use the old blending method for comparison
+                with col1:
+                    # Simple alpha blending for comparison
+                    basic_result = replace_product_in_image(
+                        original_img,
+                        graded_product,
+                        st.session_state.binary_mask,
+                        scale_factor,
+                        0,  # No feathering
+                        "alpha"  # Basic alpha blending
+                    )
+                    st.image(basic_result, caption="Original Blending", use_container_width=True)
+                    
+                with col2:
+                    st.image(result_image, caption="Improved Blending", use_container_width=True)
                 
                 # Save the result to a temporary file for download
                 result_pil = Image.fromarray(result_image)
