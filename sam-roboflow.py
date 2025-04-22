@@ -602,7 +602,7 @@ def load_model():
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     
     # Path to the local model file (in the same directory as the app)
-    checkpoint_path = "/Users/akshatmajila/SAM-Setu/sam_vit_h_4b8939.pth"
+    checkpoint_path = "/Users/akshatmajila/SAM-Setu/sam_vit_b_01ec64.pth"
     
     # Check if the model file exists
     if not os.path.isfile(checkpoint_path):
@@ -610,7 +610,7 @@ def load_model():
         st.stop()
     
     # Load the model
-    model_type = "vit_h"
+    model_type = "vit_b"
     sam = sam_model_registry[model_type](checkpoint=checkpoint_path).to(device=device)
     mask_predictor = SamPredictor(sam)
     
@@ -744,8 +744,6 @@ if uploaded_ad_file is not None:
                 file_name="segmentation_mask.png",
                 mime="image/png"
             )
-
-# Replace lines ~458-520 with this correctly indented version:
 
 # Product replacement section (only shown after mask generation)
 if st.session_state.binary_mask is not None:
