@@ -2,49 +2,109 @@ import streamlit as st
 import torch
 import numpy as np
 import cv2
-import supervision as sv
 import os
 import tempfile
 from PIL import Image
 from segment_anything import sam_model_registry, SamPredictor
 import matplotlib.pyplot as plt
+from streamlit_drawable_canvas import st_canvas
 
-
+# Set page configuration to wide layout
 st.set_page_config(
     page_title="Drishya",
     page_icon="🖼️",
-    layout="centered",
+    layout="wide",
 )
 
-# Helper functions - moved to the top before they are used
-def show_mask(ax, mask, random_color=False):
-    """Display the mask on an axis."""
-    if random_color:
-        color = np.concatenate([np.random.random(3), np.array([0.6])], axis=0)
+# Password protection
+def check_password():
+    """Returns `True` if the user had the correct password."""
+    
+    def password_entered():
+        """Checks whether a password entered by the user is correct."""
+        if st.session_state["password"] == "setuftw":
+            st.session_state["password_correct"] = True
+            del st.session_state["password"]  # don't store password
+        else:
+            st.session_state["password_correct"] = False
+
+    if "password_correct" not in st.session_state:
+        # First run, show input for password
+        st.text_input(
+            "Enter the magic words", type="password", on_change=password_entered, key="password"
+        )
+        return False
+    elif not st.session_state["password_correct"]:
+        # Password incorrect, show input + error
+        st.text_input(
+            "Password", type="password", on_change=password_entered, key="password"
+        )
+        st.error("😕 Password incorrect")
+        return False
     else:
-        color = np.array([30/255, 144/255, 255/255, 0.6]) 
+        # Password correct
+        return True
+
+if not check_password():
+    st.stop()  # Stop execution if password is incorrect
+
+# Helper functions
+def show_mask(mask, image):
+    """Apply mask on image for visualization."""
+    color = np.array([30/255, 144/255, 255/255, 0.6])
     h, w = mask.shape[-2:]
     mask_image = mask.reshape(h, w, 1) * color.reshape(1, 1, -1)
-    ax.imshow(mask_image)
+    
+    # Create a visualization with mask overlay
+    result = image.copy()
+    mask_rgb = (mask_image[:,:,:3] * 255).astype(np.uint8)
+    mask_alpha = (mask_image[:,:,3:] * 255).astype(np.uint8)
+    
+    # Blend where mask exists
+    alpha_channel = mask_alpha / 255.0
+    for c in range(3):
+        result[:,:,c] = result[:,:,c] * (1 - alpha_channel[:,:,0]) + mask_rgb[:,:,c] * alpha_channel[:,:,0]
+    
+    return result
 
-def show_box(ax, box):
-    """Display the bounding box on an axis."""
-    x0, y0, x1, y1 = box
-    ax.add_patch(plt.Rectangle((x0, y0), x1 - x0, y1 - y0, edgecolor='red', facecolor=(0, 0, 0, 0), lw=2))
+def create_feathered_mask(mask, feather_amount=10):
+    """Create a feathered mask with smooth edges for better blending."""
+    # Ensure mask is binary
+    if len(mask.shape) > 2:
+        mask = mask[:, :, 0]
+    binary_mask = (mask > 128).astype(np.uint8)
+    
+    # Create distance transform from the mask edges
+    dist_transform = cv2.distanceTransform(binary_mask, cv2.DIST_L2, 3)
+    
+    # Normalize the distance transform
+    cv2.normalize(dist_transform, dist_transform, 0, 1.0, cv2.NORM_MINMAX)
+    
+    # Create inverse distance transform for outside the mask
+    inv_binary_mask = 1 - binary_mask
+    inv_dist_transform = cv2.distanceTransform(inv_binary_mask, cv2.DIST_L2, 3)
+    cv2.normalize(inv_dist_transform, inv_dist_transform, 0, 1.0, cv2.NORM_MINMAX)
+    
+    # Create a feathered mask by combining both distance transforms
+    feathered_mask = np.ones_like(dist_transform, dtype=np.float32)
+    
+    # Apply feathering at the boundaries
+    feathered_mask = np.where(
+        dist_transform > 0,
+        np.minimum(1.0, dist_transform * (feather_amount / 2)),
+        feathered_mask
+    )
+    
+    feathered_mask = np.where(
+        inv_dist_transform < feather_amount,
+        np.maximum(0.0, 1.0 - (inv_dist_transform / feather_amount)),
+        feathered_mask * binary_mask
+    )
+    
+    return feathered_mask
 
 def apply_color_grading(product_image, target_image, mask, strength=0.5):
-    """
-    Apply color grading to make the product match the color tone of the target area.
-    
-    Args:
-        product_image: The product image to adjust (numpy array)
-        target_image: The target image containing the color tone to match (numpy array)
-        mask: Binary mask of the target area (numpy array)
-        strength: How strongly to apply the color grading (0.0-1.0)
-    
-    Returns:
-        Color-graded product image
-    """
+    """Apply color grading to make the product match the color tone of the target area."""
     # Ensure mask is binary and has correct shape
     if len(mask.shape) > 2:
         mask = mask[:, :, 0]
@@ -160,118 +220,7 @@ def apply_color_grading(product_image, target_image, mask, strength=0.5):
     
     return graded_product
 
-def create_feathered_mask(mask, feather_amount=10):
-    """
-    Create a feathered mask with smooth edges for better blending.
-    
-    Args:
-        mask: Binary mask (numpy array)
-        feather_amount: Amount of feathering in pixels
-        
-    Returns:
-        Feathered mask (numpy array)
-    """
-    import cv2
-    import numpy as np
-    
-    # Ensure mask is binary
-    if len(mask.shape) > 2:
-        mask = mask[:, :, 0]
-    binary_mask = (mask > 128).astype(np.uint8)
-    
-    # Create distance transform from the mask edges
-    dist_transform = cv2.distanceTransform(binary_mask, cv2.DIST_L2, 3)
-    
-    # Normalize the distance transform
-    cv2.normalize(dist_transform, dist_transform, 0, 1.0, cv2.NORM_MINMAX)
-    
-    # Create inverse distance transform for outside the mask
-    inv_binary_mask = 1 - binary_mask
-    inv_dist_transform = cv2.distanceTransform(inv_binary_mask, cv2.DIST_L2, 3)
-    cv2.normalize(inv_dist_transform, inv_dist_transform, 0, 1.0, cv2.NORM_MINMAX)
-    
-    # Create a feathered mask by combining both distance transforms
-    feathered_mask = np.ones_like(dist_transform, dtype=np.float32)
-    
-    # Apply feathering at the boundaries
-    feathered_mask = np.where(
-        dist_transform > 0,
-        np.minimum(1.0, dist_transform * (feather_amount / 2)),
-        feathered_mask
-    )
-    
-    feathered_mask = np.where(
-        inv_dist_transform < feather_amount,
-        np.maximum(0.0, 1.0 - (inv_dist_transform / feather_amount)),
-        feathered_mask * binary_mask
-    )
-    
-    return feathered_mask
-
-def apply_poisson_blending(source, target, mask, offset=(0, 0)):
-    """
-    Apply Poisson blending for seamless integration of the source into the target.
-    
-    Args:
-        source: Source image to blend (numpy array)
-        target: Target image to blend into (numpy array)
-        mask: Binary mask of the source region (numpy array)
-        offset: (y, x) offset for placing source into target
-        
-    Returns:
-        Blended image (numpy array)
-    """
-    import cv2
-    import numpy as np
-    
-    # Ensure mask is binary
-    if len(mask.shape) > 2:
-        mask = mask[:, :, 0]
-    binary_mask = (mask > 128).astype(np.uint8) * 255
-    
-    # Get the region of interest
-    y_indices, x_indices = np.where(binary_mask > 0)
-    if len(y_indices) == 0 or len(x_indices) == 0:
-        return target
-        
-    y_min, y_max = y_indices.min(), y_indices.max()
-    x_min, x_max = x_indices.min(), x_indices.max()
-    
-    # Create sub-images for blending
-    src_roi = source[y_min:y_max+1, x_min:x_max+1]
-    tgt_roi = target[y_min:y_max+1, x_min:x_max+1]
-    mask_roi = binary_mask[y_min:y_max+1, x_min:x_max+1]
-    
-    # Apply blending
-    try:
-        # Seamless clone (Poisson blending)
-        # center point for placement
-        center = ((x_max - x_min) // 2, (y_max - y_min) // 2)
-        
-        # Resize source ROI to match mask ROI if needed
-        if src_roi.shape[:2] != mask_roi.shape[:2]:
-            src_roi = cv2.resize(src_roi, (mask_roi.shape[1], mask_roi.shape[0]))
-        
-        # Create a temp result image 
-        temp_result = np.copy(tgt_roi)
-        blended_roi = cv2.seamlessClone(
-            src_roi.astype(np.uint8), 
-            tgt_roi.astype(np.uint8), 
-            mask_roi, 
-            center, 
-            cv2.NORMAL_CLONE
-        )
-        
-        # Copy the result back
-        result = target.copy()
-        result[y_min:y_max+1, x_min:x_max+1] = blended_roi
-        return result
-    except cv2.error as e:
-        # Fallback to alpha blending if seamless clone fails
-        print(f"Seamless clone failed: {e}, falling back to alpha blending")
-        return target
-
-def replace_product_in_image(ad_image, new_product, mask, scale_factor=1.0, feather_amount=15, blend_method="advanced"):
+def replace_product_in_image(ad_image, new_product, mask, scale_factor=1.0, feather_amount=15, use_blending=True):
     """
     Replace a product in an ad image with improved edge blending.
     
@@ -281,14 +230,11 @@ def replace_product_in_image(ad_image, new_product, mask, scale_factor=1.0, feat
         mask: Binary segmentation mask of the product to replace (numpy array)
         scale_factor: Controls how much of the mask area the product will fill
         feather_amount: Amount of edge feathering in pixels
-        blend_method: Blending method to use ('alpha', 'poisson', or 'advanced')
+        use_blending: Whether to apply edge blending or not
         
     Returns:
         The modified image with the new product inserted
     """
-    import cv2
-    import numpy as np
-    
     # Ensure mask is binary
     if len(mask.shape) > 2:
         mask = mask[:, :, 0]
@@ -331,8 +277,10 @@ def replace_product_in_image(ad_image, new_product, mask, scale_factor=1.0, feat
     offset_x = int((mask_width - resize_width) / 2)
     offset_y = int((mask_height - resize_height) / 2)
     
-    # Create a feathered mask for better edge blending
-    feathered_mask = create_feathered_mask(binary_mask[y_min:y_max+1, x_min:x_max+1], feather_amount)
+    # Create a feathered mask for better edge blending if blending is enabled
+    feathered_mask = binary_mask[y_min:y_max+1, x_min:x_max+1].astype(np.float32)
+    if use_blending:
+        feathered_mask = create_feathered_mask(binary_mask[y_min:y_max+1, x_min:x_max+1], feather_amount)
     
     # Handle transparent images (RGBA)
     if new_product.shape[2] == 4:
@@ -382,7 +330,7 @@ def replace_product_in_image(ad_image, new_product, mask, scale_factor=1.0, feat
             
             product_mask[paste_y_start:paste_y_end, paste_x_start:paste_x_end] = resized_alpha[prod_y_start:prod_y_end, prod_x_start:prod_x_end]
         
-        # Apply the binary mask and then the feathered mask for smooth edges
+        # Apply the binary mask and then the feathered mask for smooth edges if blending is enabled
         product_mask = product_mask * feathered_mask
         
         # Create 3-channel alpha for blending
@@ -396,73 +344,37 @@ def replace_product_in_image(ad_image, new_product, mask, scale_factor=1.0, feat
         if paste_y_end > paste_y_start and paste_x_end > paste_x_start:
             rgb_to_blend[paste_y_start:paste_y_end, paste_x_start:paste_x_end] = resized_rgb[prod_y_start:prod_y_end, prod_x_start:prod_x_end]
         
-        # ----- ADVANCED BLENDING TECHNIQUES -----
-        if blend_method == "alpha":
-            # Basic alpha blending
-            blended_roi = roi * (1 - product_mask_3ch) + rgb_to_blend * product_mask_3ch
-            
-        elif blend_method == "poisson":
-            # Try Poisson blending for realistic edges
-            try:
-                # Create a temporary mask for the placed product
-                temp_mask = np.zeros((mask_height, mask_width), dtype=np.uint8)
-                temp_mask[paste_y_start:paste_y_end, paste_x_start:paste_x_end] = 255
-                
-                # Apply Poisson blending
-                blended_temp = apply_poisson_blending(rgb_to_blend, roi, temp_mask)
-                
-                # Use the product mask for the final blend to maintain transparency
-                blended_roi = roi * (1 - product_mask_3ch) + blended_temp * product_mask_3ch
-            except Exception as e:
-                # Fallback to alpha blending
-                blended_roi = roi * (1 - product_mask_3ch) + rgb_to_blend * product_mask_3ch
-                
-        else:  # "advanced" - custom edge-aware blending
-            # Gradient-domain blending for realistic edges
-            # First apply alpha blending
-            alpha_blend = roi * (1 - product_mask_3ch) + rgb_to_blend * product_mask_3ch
-            
+        # Basic alpha blending
+        blended_roi = roi * (1 - product_mask_3ch) + rgb_to_blend * product_mask_3ch
+        
+        if use_blending:
             # Edge detection on the original mask to identify boundary regions
             edge_kernel = np.ones((5, 5), np.uint8)
             edge_mask = cv2.dilate(binary_mask[y_min:y_max+1, x_min:x_max+1], edge_kernel) - binary_mask[y_min:y_max+1, x_min:x_max+1]
             edge_mask = np.clip(edge_mask, 0, 1).astype(np.float32)
             
-            # Create edge-aware 3-channel mask
-            edge_mask_3ch = np.stack([edge_mask, edge_mask, edge_mask], axis=2)
-            
-            # Calculate local color statistics for the boundary
-            boundary_color_mean = np.zeros((3,), dtype=np.float32)
-            if edge_mask.sum() > 0:
-                for c in range(3):
-                    boundary_color_mean[c] = np.mean(roi[:,:,c][edge_mask > 0])
-            
-            # Apply color harmonization at the edges
-            harmonized_blend = alpha_blend.copy()
-            for c in range(3):
-                edge_adjustment = (roi[:,:,c] - alpha_blend[:,:,c]) * edge_mask * 0.5
-                harmonized_blend[:,:,c] = alpha_blend[:,:,c] + edge_adjustment
-            
-            # Apply guided filtering to improve edge transitions
+            # Apply guided filtering for improved edge transitions
             try:
                 r = 5  # Filter radius
                 eps = 0.1  # Regularization parameter
                 
-                # Use guided filter from OpenCV if available, otherwise fall back to the simplified approach
+                harmonized_blend = blended_roi.copy()
                 for c in range(3):
                     harmonized_blend[:,:,c] = cv2.guidedFilter(
                         roi[:,:,c].astype(np.float32), 
-                        harmonized_blend[:,:,c].astype(np.float32),
+                        blended_roi[:,:,c].astype(np.float32),
                         r, eps
                     )
+                
+                blended_roi = harmonized_blend.astype(np.uint8)
             except:
-                # Fallback to simple blurring at the edges if guided filter is not available
+                # Fallback to simple blurring at the edges
                 blur_amount = 3
                 edge_blur = cv2.GaussianBlur(edge_mask, (blur_amount*2+1, blur_amount*2+1), 0) * 0.7
                 edge_blur_3ch = np.stack([edge_blur, edge_blur, edge_blur], axis=2)
                 
-                harmonized_blend = harmonized_blend * (1 - edge_blur_3ch) + cv2.GaussianBlur(harmonized_blend, (blur_amount*2+1, blur_amount*2+1), 0) * edge_blur_3ch
-            
-            blended_roi = harmonized_blend.astype(np.uint8)
+                harmonized_blend = blended_roi * (1 - edge_blur_3ch) + cv2.GaussianBlur(blended_roi, (blur_amount*2+1, blur_amount*2+1), 0) * edge_blur_3ch
+                blended_roi = harmonized_blend.astype(np.uint8)
         
         # Place the blended region back into the output image
         output[y_min:y_max+1, x_min:x_max+1] = blended_roi
@@ -521,83 +433,42 @@ def replace_product_in_image(ad_image, new_product, mask, scale_factor=1.0, feat
         # Get the region of interest
         roi = output[y_min:y_max+1, x_min:x_max+1]
         
-        # ----- ADVANCED BLENDING TECHNIQUES -----
-        if blend_method == "alpha":
-            # Basic alpha blending
-            blended_roi = roi * (1 - product_mask_3ch) + product_to_blend * product_mask_3ch
-            
-        elif blend_method == "poisson":
-            # Try Poisson blending
-            try:
-                # Create a temporary mask for the placed product
-                temp_mask = np.zeros((mask_height, mask_width), dtype=np.uint8)
-                temp_mask[paste_y_start:paste_y_end, paste_x_start:paste_x_end] = 255
-                
-                # Apply the mask from feathering
-                temp_mask = (temp_mask / 255.0 * feathered_mask * 255).astype(np.uint8)
-                
-                # Apply Poisson blending
-                blended_roi = apply_poisson_blending(product_to_blend, roi, temp_mask)
-            except Exception as e:
-                # Fallback to alpha blending
-                blended_roi = roi * (1 - product_mask_3ch) + product_to_blend * product_mask_3ch
-                
-        else:  # "advanced" - custom edge-aware blending
-            # First apply alpha blending
-            alpha_blend = roi * (1 - product_mask_3ch) + product_to_blend * product_mask_3ch
-            
+        # Basic alpha blending
+        blended_roi = roi * (1 - product_mask_3ch) + product_to_blend * product_mask_3ch
+        
+        if use_blending:
             # Edge detection to identify boundary regions
             edge_kernel = np.ones((5, 5), np.uint8)
             edge_mask = cv2.dilate(binary_mask[y_min:y_max+1, x_min:x_max+1], edge_kernel) - binary_mask[y_min:y_max+1, x_min:x_max+1]
             edge_mask = np.clip(edge_mask, 0, 1).astype(np.float32)
-            
-            # Create edge-aware 3-channel mask
-            edge_mask_3ch = np.stack([edge_mask, edge_mask, edge_mask], axis=2)
             
             # Apply guided filtering for improved edge transitions
             try:
                 r = 5  # Filter radius
                 eps = 0.1  # Regularization parameter
                 
-                harmonized_blend = alpha_blend.copy()
+                harmonized_blend = blended_roi.copy()
                 for c in range(3):
                     harmonized_blend[:,:,c] = cv2.guidedFilter(
                         roi[:,:,c].astype(np.float32), 
-                        alpha_blend[:,:,c].astype(np.float32),
+                        blended_roi[:,:,c].astype(np.float32),
                         r, eps
                     )
+                
+                blended_roi = harmonized_blend.astype(np.uint8)
             except:
                 # Fallback to simple blurring at the edges
                 blur_amount = 3
                 edge_blur = cv2.GaussianBlur(edge_mask, (blur_amount*2+1, blur_amount*2+1), 0) * 0.7
                 edge_blur_3ch = np.stack([edge_blur, edge_blur, edge_blur], axis=2)
                 
-                harmonized_blend = alpha_blend * (1 - edge_blur_3ch) + cv2.GaussianBlur(alpha_blend, (blur_amount*2+1, blur_amount*2+1), 0) * edge_blur_3ch
-            
-            blended_roi = harmonized_blend.astype(np.uint8)
+                harmonized_blend = blended_roi * (1 - edge_blur_3ch) + cv2.GaussianBlur(blended_roi, (blur_amount*2+1, blur_amount*2+1), 0) * edge_blur_3ch
+                blended_roi = harmonized_blend.astype(np.uint8)
         
         # Place the blended region back into the output image
         output[y_min:y_max+1, x_min:x_max+1] = blended_roi
     
     return output
-
-# Sidebar setup
-logo_path = os.path.join(os.path.dirname(__file__), "logo setu.jpeg")
-if os.path.exists(logo_path):
-    st.sidebar.image(logo_path, width=50, use_container_width=True)
-else:
-    st.sidebar.title("Drishya")
-
-# App title and description
-st.title("Drishya")
-st.markdown("""
-Product Image Replacement Tool built using Segment Anything Model (SAM) 
-1. Upload an advertisement image
-2. Draw a bounding box around the product you want to replace
-3. Generate segmentation mask
-4. Upload a new product image to replace the original
-5. Download the final image
-""")
 
 @st.cache_resource
 def load_model():
@@ -605,8 +476,8 @@ def load_model():
     # Check if CUDA is available
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     
-    # Use relative path or environment variable for model
-    checkpoint_path = os.path.join(os.path.dirname(__file__), "sam_vit_b_01ec64.pth")
+    # Path to the local model file (in the same directory as the app)
+    checkpoint_path = "/Users/akshatmajila/Setu-Deployment/sam_vit_b_01ec64.pth"
     
     # Check if the model file exists
     if not os.path.isfile(checkpoint_path):
@@ -620,27 +491,37 @@ def load_model():
     
     return mask_predictor, device
 
-# Load the model
-mask_predictor, device = load_model()
-st.success("Model loaded successfully")
+# App title and description
+st.title("Drishya - Product Image Replacement Tool")
+st.markdown("""
+A tool that lets you replace products in images using AI segmentation. Follow these steps:
+1. Upload an image
+2. Draw a box around the product to replace
+3. Upload a new product image
+4. Adjust settings and download the result
+""")
 
 # Create session state for storing data between reruns
-if 'generated_masks' not in st.session_state:
-    st.session_state.generated_masks = None
-if 'best_mask_idx' not in st.session_state:
-    st.session_state.best_mask_idx = None
-if 'box' not in st.session_state:
-    st.session_state.box = None
+if 'generated_mask' not in st.session_state:
+    st.session_state.generated_mask = None
 if 'original_image' not in st.session_state:
     st.session_state.original_image = None
-if 'binary_mask' not in st.session_state:
-    st.session_state.binary_mask = None
+if 'box_drawn' not in st.session_state:
+    st.session_state.box_drawn = None
+if 'mask_displayed' not in st.session_state:
+    st.session_state.mask_displayed = False
+if 'processing_step' not in st.session_state:
+    st.session_state.processing_step = 1  # Track the current step
 
-# Upload an image
-st.sidebar.header("Upload Image")
-uploaded_ad_file = st.sidebar.file_uploader("Upload 4o Generated Image Here", type=["jpg", "jpeg", "png"], key="ad_image")
+# Step 1: Image upload
+st.header("Step 1: Upload Image")
+uploaded_ad_file = st.file_uploader("Upload image with product to replace", type=["jpg", "jpeg", "png"], key="ad_image")
 
 if uploaded_ad_file is not None:
+    # Load the SAM model
+    with st.spinner("Loading AI model..."):
+        mask_predictor, device = load_model()
+    
     # Read the image
     image = Image.open(uploaded_ad_file)
     image_np = np.array(image)
@@ -650,258 +531,236 @@ if uploaded_ad_file is not None:
     
     # Convert image to RGB if it's RGBA
     if image_np.shape[-1] == 4:  # RGBA
-        image_np = cv2.cvtColor(image_np, cv2.COLOR_RGBA2RGB)
+        image_rgb = cv2.cvtColor(image_np, cv2.COLOR_RGBA2RGB)
+    else:
+        image_rgb = image_np.copy()
     
-    # Display the uploaded image
-    st.header("Step 1: Define Bounding Box")
-    st.image(image_np, caption="Uploaded Advertisement Image", use_container_width=True)
+    # Step 2: Draw bounding box
+    st.header("Step 2: Draw Bounding Box")
+    st.markdown("Draw a box around the product you want to replace")
     
-    # Get image dimensions
-    height, width = image_np.shape[:2]
+    # Canvas for drawing
+    # Set up a reasonable canvas size based on image dimensions
+    h, w = image_rgb.shape[:2]
+    canvas_width = min(800, w)
+    canvas_height = int(h * (canvas_width / w))
     
-    # Create columns for sliders
-    col1, col2 = st.columns(2)
-    
-    # Bounding box inputs
-    with col1:
-        st.subheader("X-axis Controls")
-        x_min = st.slider("X Min", 0, width-1, 200)
-        x_max = st.slider("X Max", x_min+1, width, 800)
-    
-    with col2:
-        st.subheader("Y-axis Controls")
-        y_min = st.slider("Y Min", 0, height-1, 200)
-        y_max = st.slider("Y Max", y_min+1, height, 800)
-    
-    # Convert the image to RGB for SAM
-    image_rgb = cv2.cvtColor(image_np, cv2.COLOR_BGR2RGB) if len(image_np.shape) == 3 else cv2.cvtColor(image_np, cv2.COLOR_GRAY2RGB)
-    
-    # Display image with bounding box
-    fig, ax = plt.subplots(1, 1, figsize=(10, 10))
-    ax.imshow(image_rgb)
-    rect = plt.Rectangle((x_min, y_min), x_max - x_min, y_max - y_min, fill=False, edgecolor='red', linewidth=2)
-    ax.add_patch(rect)
-    ax.axis('off')
-    st.pyplot(fig)
-    
-    # Process the image with SAM
-    if st.button("Generate Segmentation Masks"):
-        with st.spinner("Processing image with SAM..."):
-            # Define the bounding box
-            box = np.array([x_min, y_min, x_max, y_max])
-            st.session_state.box = box
+    canvas_result = st_canvas(
+        fill_color="rgba(255, 0, 0, 0.2)",
+        stroke_width=2,
+        stroke_color="rgba(255, 0, 0, 1)",
+        background_image=Image.fromarray(image_rgb),
+        height=canvas_height,
+        width=canvas_width,
+        drawing_mode="rect",
+        key="canvas",
+        update_streamlit=True,
+    )
+
+    # Check if a bounding box was drawn
+    if canvas_result.json_data is not None and "objects" in canvas_result.json_data:
+        objects = canvas_result.json_data["objects"]
+        
+        if objects:
+            # Get the box coordinates from the first object
+            rect = objects[0]
+            box_height = rect.get("height", 0) * (h / canvas_height)
+            box_width = rect.get("width", 0) * (w / canvas_width)
+            box_left = rect.get("left", 0) * (w / canvas_width)
+            box_top = rect.get("top", 0) * (h / canvas_height)
             
-            # Set the image for the predictor
-            mask_predictor.set_image(image_rgb)
+            # Convert to the [x_min, y_min, x_max, y_max] format needed by SAM
+            x_min = max(0, int(box_left))
+            y_min = max(0, int(box_top))
+            x_max = min(w, int(box_left + box_width))
+            y_max = min(h, int(box_top + box_height))
             
-            # Generate masks
-            masks, scores, logits = mask_predictor.predict(
-                box=box,
-                multimask_output=True
-            )
+            # Save the box coordinates
+            st.session_state.box_drawn = [x_min, y_min, x_max, y_max]
             
-            # Save generated masks to session state
-            st.session_state.generated_masks = masks
-            st.session_state.best_mask_idx = np.argmax(scores)
-        
-        st.header("Step 2: View Segmentation Results")
-        
-        # Display the masks
-        st.subheader("Generated Masks")
-        fig, axes = plt.subplots(1, len(masks), figsize=(15, 5))
-        if len(masks) == 1:
-            axes = [axes]
+            # Display the box coordinates
+            col1, col2 = st.columns(2)
+            with col1:
+                st.write(f"Box Coordinates: X({x_min}, {x_max}), Y({y_min}, {y_max})")
             
-        for i, (mask, score) in enumerate(zip(masks, scores)):
-            axes[i].imshow(image_rgb)
-            show_mask(axes[i], mask, random_color=False)
-            axes[i].title.set_text(f"Mask {i+1} (Score: {score:.3f})")
-            axes[i].axis('off')
-        st.pyplot(fig)
-        
-        # Display the best mask applied to the image
-        st.subheader("Best Mask Applied to Image")
-        best_mask_idx = np.argmax(scores)
-        
-        # Create a visualization of the mask on the image
-        fig, ax = plt.subplots(1, 1, figsize=(10, 10))
-        ax.imshow(image_rgb)
-        show_mask(ax, masks[best_mask_idx], random_color=False)
-        show_box(ax, box)
-        ax.axis('off')
-        st.pyplot(fig)
-        
-        # Create a binary mask image
-        binary_mask = masks[best_mask_idx].astype(np.uint8) * 255
-        st.session_state.binary_mask = binary_mask
-        st.image(binary_mask, caption="Binary Mask (Best Score)", use_container_width=True)
-        
-        # Option to download the mask
-        mask_pil = Image.fromarray(binary_mask)
-        buf = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
-        mask_pil.save(buf.name)
-        
-        with open(buf.name, 'rb') as f:
-            st.download_button(
-                label="Download Mask",
-                data=f,
-                file_name="segmentation_mask.png",
-                mime="image/png"
-            )
-
-# Product replacement section (only shown after mask generation)
-if st.session_state.binary_mask is not None:
-    st.header("Step 3: Replace Product")
-    
-    # Upload replacement product image
-    uploaded_product = st.file_uploader("Upload New Product Image (preferably with transparent background)", type=["png", "jpg", "jpeg"], key="product_image")
-    
-    # Scale factor slider - now properly indented
-    scale_factor = st.slider(
-        "Product Scale", 
-        min_value=0.5, 
-        max_value=2.0,
-        value=1.0, 
-        step=0.05,
-        help="Control product size relative to mask (1.0 = exact fit, >1.0 = larger than mask)"
-    )
-
-    st.subheader("Color Grading Options")
-    enable_color_grading = st.checkbox("Enable Color Grading", value=True, 
-                                      help="Apply color adjustment to match product color tone with the background")
-
-    color_grade_strength = st.slider(
-        "Color Grade Strength", 
-        min_value=0.0, 
-        max_value=1.0, 
-        value=0.5, 
-        step=0.05,
-        help="How strongly to apply the color grading (0 = original colors, 1 = full match)"
-    )
-
-    # Color grading method selection
-    grading_method = st.radio(
-        "Color Grading Method",
-        ["Match Target Area", "Match Entire Image"],
-        help="Choose whether to match colors with just the target area or the entire image"
-    )
-
-    st.header("Edge Blending Options")
-    blend_method = st.selectbox(
-        "Blending Method",
-        ["advanced", "alpha", "poisson"],
-        index=0,
-        help="Choose blending method: 'advanced' for best results, 'alpha' for simple transparency, 'poisson' for seamless integration"
-    )
-
-    feather_amount = st.slider(
-        "Edge Feathering Amount", 
-        min_value=0, 
-        max_value=30, 
-        value=15, 
-        step=1,
-        help="Controls the softness of edges (higher = softer transitions)"
-    )
-
-    st.write("Advanced blending combines multiple techniques for the most realistic results.")
-    st.write("Poisson blending works well with solid objects but may fail with complex images.")
-    st.write("Alpha blending is the simplest method and works in all cases.")
-
-    if uploaded_product is not None:
-        # Read the new product image
-        new_product_img = Image.open(uploaded_product)
-        new_product_np = np.array(new_product_img)
-        
-        # Display the new product image
-        st.image(new_product_np, caption="New Product Image", width=300)
-        
-        # Perform the replacement
-        if st.button("Replace Product"):
-            with st.spinner("Replacing product..."):
-                # Ensure the original image is in the correct format
-                original_img = st.session_state.original_image
-                if original_img.shape[-1] == 4:  # RGBA
-                    original_img = cv2.cvtColor(original_img, cv2.COLOR_RGBA2RGB)
-                
-                # Ensure new product is in the correct format
-                if len(new_product_np.shape) == 2:  # Grayscale
-                    new_product_np = cv2.cvtColor(new_product_np, cv2.COLOR_GRAY2RGB)
-                
-                # Apply color grading if enabled
-                graded_product = new_product_np.copy()
-                if enable_color_grading:
-                    if grading_method == "Match Target Area":
-                        # Use the mask area for color matching
-                        graded_product = apply_color_grading(
-                            new_product_np, 
-                            original_img, 
-                            st.session_state.binary_mask, 
-                            color_grade_strength
+            with col2:
+                if st.button("Generate Mask", key="generate_mask"):
+                    with st.spinner("Processing image with AI..."):
+                        # Set the image for the predictor
+                        mask_predictor.set_image(image_rgb)
+                        
+                        # Generate masks
+                        masks, scores, logits = mask_predictor.predict(
+                            box=np.array([x_min, y_min, x_max, y_max]),
+                            multimask_output=True
                         )
-                    else:  # Match Entire Image
-                        # Create a full-image mask for color matching with the entire image
-                        full_mask = np.ones(original_img.shape[:2], dtype=np.uint8) * 255
-                        graded_product = apply_color_grading(
-                            new_product_np,
-                            original_img,
-                            full_mask,
-                            color_grade_strength
-                        )
-                    
-                    # Display the color-graded product
-                    st.subheader("Color-Graded Product")
-                    st.image(graded_product, caption="Product After Color Grading", width=300)
-                
-                # Replace the product with improved edge blending
-                result_image = replace_product_in_image(
-                    original_img,
-                    graded_product,
-                    st.session_state.binary_mask,
-                    scale_factor,
-                    feather_amount,
-                    blend_method
+                        
+                        # Get best mask by score
+                        best_mask_idx = np.argmax(scores)
+                        binary_mask = masks[best_mask_idx].astype(np.uint8) * 255
+                        
+                        # Save to session state
+                        st.session_state.generated_mask = binary_mask
+                        st.session_state.mask_displayed = True
+                        st.session_state.processing_step = 3  # Advance to next step
+                        
+                        # Force re-run to update the UI
+                        st.experimental_rerun()
+
+    # Step 3: Show mask and allow product upload
+    if st.session_state.mask_displayed and st.session_state.generated_mask is not None:
+        st.header("Step 3: Mask Generated")
+        
+        # Create two columns to display the original image and the mask side by side
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("**Original Image**")
+            st.image(image_rgb, use_column_width=True)
+        
+        with col2:
+            st.markdown("**Generated Mask**")
+            # Create visualization with mask overlay
+            mask_vis = show_mask(st.session_state.generated_mask, image_rgb)
+            st.image(mask_vis, use_column_width=True)
+        
+        # Step 4: Product replacement
+        st.header("Step 4: Replace Product")
+        
+        # Upload replacement product image
+        uploaded_product = st.file_uploader("Upload New Product Image", type=["png", "jpg", "jpeg"], key="product_image")
+        
+        if uploaded_product is not None:
+            # Read the new product image
+            new_product_img = Image.open(uploaded_product)
+            new_product_np = np.array(new_product_img)
+            
+            # Create a row for the product preview and settings
+            col1, col2 = st.columns([1, 2])
+            
+            with col1:
+                st.markdown("**New Product Image**")
+                prod_h, prod_w = new_product_np.shape[:2]
+                st.image(new_product_np, width=int(prod_w/2), use_column_width=False)
+            
+            with col2:
+                # Scale factor slider
+                scale_factor = st.slider(
+                    "Product Scale", 
+                    min_value=0.5, 
+                    max_value=2.0,
+                    value=1.0, 
+                    step=0.05,
+                    help="Control product size relative to mask (1.0 = exact fit, >1.0 = larger than mask)"
                 )
                 
-                # Display the result
-                st.subheader("Final Result")
-                st.image(result_image, caption="Advertisement with Replaced Product", use_container_width=True)
+                # Blending options
+                use_blending = st.checkbox("Use Edge Blending", value=True, 
+                                         help="Enable advanced edge blending (uncheck to keep product edges as-is)")
                 
-                # Compare with original blend
-                st.subheader("Comparison")
-                col1, col2 = st.columns(2)
+                # Only show feathering slider if blending is enabled
+                feather_amount = 15  # Default value
+                if use_blending:
+                    feather_amount = st.slider(
+                        "Edge Feathering Amount", 
+                        min_value=0, 
+                        max_value=30, 
+                        value=15, 
+                        step=1,
+                        help="Controls the softness of edges (higher = softer transitions)"
+                    )
                 
-                # Use the old blending method for comparison
-                with col1:
-                    # Simple alpha blending for comparison
-                    basic_result = replace_product_in_image(
+                # Collapsible UI for Color Grading Options
+                with st.expander("Color Grading Options"):
+                    enable_color_grading = st.checkbox("Enable Color Grading", value=True, 
+                                                    help="Apply color adjustment to match product color tone with the background")
+                    
+                    # Only show strength slider if color grading is enabled
+                    color_grade_strength = 0.5  # Default value
+                    if enable_color_grading:
+                        color_grade_strength = st.slider(
+                            "Color Grade Strength", 
+                            min_value=0.0, 
+                            max_value=1.0, 
+                            value=0.5, 
+                            step=0.05,
+                            help="How strongly to apply the color grading (0 = original colors, 1 = full match)"
+                        )
+                        
+                        grading_method = st.radio(
+                            "Color Grading Method",
+                            ["Match Target Area", "Match Entire Image"],
+                            help="Choose whether to match colors with just the target area or the entire image"
+                        )
+            
+            # Replace button
+            if st.button("Replace Product"):
+                with st.spinner("Replacing product..."):
+                    # Ensure the original image is in the correct format
+                    original_img = st.session_state.original_image
+                    if original_img.shape[-1] == 4:  # RGBA
+                        original_img = cv2.cvtColor(original_img, cv2.COLOR_RGBA2RGB)
+                    
+                    # Ensure new product is in the correct format
+                    if len(new_product_np.shape) == 2:  # Grayscale
+                        new_product_np = cv2.cvtColor(new_product_np, cv2.COLOR_GRAY2RGB)
+                    
+                    # Apply color grading if enabled
+                    graded_product = new_product_np.copy()
+                    if enable_color_grading:
+                        if grading_method == "Match Target Area":
+                            # Use the mask area for color matching
+                            graded_product = apply_color_grading(
+                                new_product_np, 
+                                original_img, 
+                                st.session_state.generated_mask, 
+                                color_grade_strength
+                            )
+                        else:  # Match Entire Image
+                            # Create a full-image mask for color matching with the entire image
+                            full_mask = np.ones(original_img.shape[:2], dtype=np.uint8) * 255
+                            graded_product = apply_color_grading(
+                                new_product_np,
+                                original_img,
+                                full_mask,
+                                color_grade_strength
+                            )
+                    
+                    # Replace the product with improved edge blending
+                    result_image = replace_product_in_image(
                         original_img,
                         graded_product,
-                        st.session_state.binary_mask,
+                        st.session_state.generated_mask,
                         scale_factor,
-                        0,  # No feathering
-                        "alpha"  # Basic alpha blending
+                        feather_amount,
+                        use_blending
                     )
-                    st.image(basic_result, caption="Original Blending", use_container_width=True)
                     
-                with col2:
-                    st.image(result_image, caption="Improved Blending", use_container_width=True)
-                
-                # Save the result to a temporary file for download
-                result_pil = Image.fromarray(result_image)
-                result_buf = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
-                result_pil.save(result_buf.name)
-                
-                with open(result_buf.name, 'rb') as f:
-                    st.download_button(
-                        label="Download Final Image",
-                        data=f,
-                        file_name="product_replaced_ad.png",
-                        mime="image/png"
-                    )
-    else:
-        # If no product image is uploaded, disable the button
-        st.button("Replace Product", disabled=True, help="Please upload a product image first")
+                    # Display the results side by side
+                    st.header("Results")
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        st.markdown("**Original Image**")
+                        st.image(original_img, use_column_width=True)
+                    
+                    with col2:
+                        st.markdown("**Replaced Product**")
+                        st.image(result_image, use_column_width=True)
+                    
+                    # Save the result to a temporary file for download
+                    result_pil = Image.fromarray(result_image)
+                    result_buf = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
+                    result_pil.save(result_buf.name)
+                    
+                    with open(result_buf.name, 'rb') as f:
+                        st.download_button(
+                            label="Download Final Image",
+                            data=f,
+                            file_name="product_replaced_image.png",
+                            mime="image/png"
+                        )
 
-
+# Add footer
 st.markdown("---")
 st.markdown("Created with ❤️ using Streamlit and Meta's Segment Anything Model (SAM)")
