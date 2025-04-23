@@ -7,3 +7,14 @@ font = "sans serif"
 
 [server]
 maxUploadSize = 200
+enableCORS = false
+enableXsrfProtection = false
+
+[browser]
+serverAddress = "0.0.0.0"
+serverPort = 8501
+gatherUsageStats = false
+
+[runner]
+magicEnabled = true
+installTracer = false
