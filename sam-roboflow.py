@@ -505,38 +505,12 @@ def load_model():
         else:
             st.stop()
     
-    # Load the model with error handling
+    # Load the model
     model_type = "vit_b"
-    try:
-        # Try loading with map_location to ensure compatibility
-        sam = sam_model_registry[model_type](
-            checkpoint=checkpoint_path, 
-            map_location=device
-        ).to(device=device)
-        mask_predictor = SamPredictor(sam)
-        return mask_predictor, device
-    except Exception as e:
-        st.error(f"Error loading model: {str(e)}")
-        st.info("This may be due to a version mismatch between the model and PyTorch. Try uploading a compatible model file.")
-        
-        # Add file uploader for model
-        uploaded_model = st.file_uploader("Upload compatible SAM model file", type=["pth"], key="retry_upload")
-        if uploaded_model is not None:
-            # Save the uploaded model to a temporary file
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.pth') as tmp_file:
-                tmp_file.write(uploaded_model.getvalue())
-                try:
-                    # Try loading with safe_load
-                    sam = sam_model_registry[model_type](
-                        checkpoint=tmp_file.name,
-                        map_location=device
-                    ).to(device=device)
-                    mask_predictor = SamPredictor(sam)
-                    return mask_predictor, device
-                except Exception as e2:
-                    st.error(f"Still unable to load model: {str(e2)}")
-                    st.stop()
-        st.stop()
+    sam = sam_model_registry[model_type](checkpoint=checkpoint_path).to(device=device)
+    mask_predictor = SamPredictor(sam)
+    
+    return mask_predictor, device
 
 # App title and description
 st.title("Drishya - Product Image Replacement Tool")
