@@ -602,7 +602,7 @@ def load_model():
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     
     # Path to the local model file (in the same directory as the app)
-    checkpoint_path = "/Users/akshatmajila/SAM-Setu/sam_vit_b_01ec64.pth"
+    checkpoint_path = "/Users/akshatmajila/Setu-Deployment/sam_vit_b_01ec64.pth"
     
     # Check if the model file exists
     if not os.path.isfile(checkpoint_path):
