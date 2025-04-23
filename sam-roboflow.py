@@ -582,7 +582,11 @@ def replace_product_in_image(ad_image, new_product, mask, scale_factor=1.0, feat
     return output
 
 # Sidebar setup
-st.sidebar.image("logo setu.jpeg", width=50, use_container_width=True)
+logo_path = os.path.join(os.path.dirname(__file__), "logo setu.jpeg")
+if os.path.exists(logo_path):
+    st.sidebar.image(logo_path, width=50, use_container_width=True)
+else:
+    st.sidebar.title("Drishya")
 
 # App title and description
 st.title("Drishya")
@@ -601,8 +605,8 @@ def load_model():
     # Check if CUDA is available
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     
-    # Path to the local model file (in the same directory as the app)
-    checkpoint_path = "/Users/akshatmajila/Setu-Deployment/sam_vit_b_01ec64.pth"
+    # Use relative path or environment variable for model
+    checkpoint_path = os.path.join(os.path.dirname(__file__), "sam_vit_b_01ec64.pth")
     
     # Check if the model file exists
     if not os.path.isfile(checkpoint_path):
