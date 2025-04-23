@@ -1,15 +1,15 @@
-streamlit
-torch>=2.2.0
-torchvision>=0.17.0
-numpy
-opencv-contrib-python-headless
-matplotlib
-Pillow
-segment-anything
-supervision
-requests
-tqdm
-dataclasses-json
-streamlit-drawable-canvas
+streamlit == 1.30.0
+torch == 2.0.1
+torchvision == 0.15.2
+numpy == 1.24.4
+opencv-contrib-python-headless == 4.8.1.78
+matplotlib == 3.7.3
+Pillow == 10.0.1
+segment-anything == 1.0
+supervision == 0.23.0
+requests == 2.31.0
+tqdm == 4.66.1
+dataclasses-json == 0.6.1
+streamlit-drawable-canvas == 0.9.3
 
 
