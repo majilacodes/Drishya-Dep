@@ -785,3 +785,4 @@ if uploaded_ad_file is not None:
 # Add footer
 st.markdown("---")
 st.markdown("Created with ❤️ using Streamlit and Meta's Segment Anything Model (SAM)")
+
