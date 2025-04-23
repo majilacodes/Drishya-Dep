@@ -476,13 +476,34 @@ def load_model():
     # Check if CUDA is available
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     
-    # Path to the local model file (in the same directory as the app)
-    checkpoint_path = "/Users/akshatmajila/Setu-Deployment/sam_vit_b_01ec64.pth"
+    # Path to the model file - look in current directory first, then try common locations
+    model_filename = "sam_vit_b_01ec64.pth"
+    possible_paths = [
+        model_filename,  # Current directory
+        os.path.join("models", model_filename),  # models subdirectory
+        os.path.join(os.path.dirname(__file__), model_filename),  # Same directory as script
+        os.path.join(os.path.dirname(__file__), "models", model_filename)  # models subdirectory relative to script
+    ]
     
-    # Check if the model file exists
-    if not os.path.isfile(checkpoint_path):
-        st.error(f"Model file not found at {checkpoint_path}. Please make sure the SAM model file is in the same directory as this app.")
-        st.stop()
+    # Try to find the model file
+    checkpoint_path = None
+    for path in possible_paths:
+        if os.path.isfile(path):
+            checkpoint_path = path
+            break
+    
+    # If model file not found, show error
+    if checkpoint_path is None:
+        st.error(f"Model file '{model_filename}' not found. Please upload the SAM model file.")
+        # Add file uploader for model
+        uploaded_model = st.file_uploader("Upload SAM model file (sam_vit_b_01ec64.pth)", type=["pth"])
+        if uploaded_model is not None:
+            # Save the uploaded model to a temporary file
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.pth') as tmp_file:
+                tmp_file.write(uploaded_model.getvalue())
+                checkpoint_path = tmp_file.name
+        else:
+            st.stop()
     
     # Load the model
     model_type = "vit_b"
