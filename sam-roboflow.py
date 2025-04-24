@@ -1,11 +1,13 @@
+import os
+import requests
 import streamlit as st
 import torch
+from segment_anything import sam_model_registry, SamPredictor
+from tqdm import tqdm
 import numpy as np
 import cv2
-import os
 import tempfile
 from PIL import Image
-from segment_anything import sam_model_registry, SamPredictor
 import matplotlib.pyplot as plt
 from streamlit_drawable_canvas import st_canvas
 import base64
@@ -473,43 +475,60 @@ def replace_product_in_image(ad_image, new_product, mask, scale_factor=1.0, feat
     return output
 
 @st.cache_resource
+def download_model(url, dest):
+    """Download a file with progress bar if it doesn't exist"""
+    if os.path.exists(dest):
+        return dest
+    
+    # Create directory if it doesn't exist
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    
+    # Download with progress bar
+    response = requests.get(url, stream=True)
+    total_size = int(response.headers.get('content-length', 0))
+    
+    # Show a Streamlit progress bar
+    progress_text = f"Downloading model from {url}"
+    progress_bar = st.progress(0)
+    
+    with open(dest, 'wb') as f:
+        downloaded = 0
+        for chunk in response.iter_content(chunk_size=1024*1024):
+            if chunk:
+                f.write(chunk)
+                downloaded += len(chunk)
+                # Update progress bar
+                if total_size:
+                    progress = int(100 * downloaded / total_size)
+                    progress_bar.progress(progress/100)
+    
+    # Clear progress bar after download
+    progress_bar.empty()
+    return dest
+
+@st.cache_resource
 def load_model():
-    """Load the SAM model from a local file"""
+    """Download and load the SAM model"""
     # Check if CUDA is available
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     
-    # Path to the model file - look in current directory first, then try common locations
-    model_filename = "sam_vit_b_01ec64.pth"
-    possible_paths = [
-        model_filename,  # Current directory
-        os.path.join("models", model_filename),  # models subdirectory
-        os.path.join(os.path.dirname(__file__), model_filename),  # Same directory as script
-        os.path.join(os.path.dirname(__file__), "models", model_filename)  # models subdirectory relative to script
-    ]
+    # Model type and URL
+    model_type = "vit_b"
+    model_url = "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth"
     
-    # Try to find the model file
-    checkpoint_path = None
-    for path in possible_paths:
-        if os.path.isfile(path):
-            checkpoint_path = path
-            break
+    # Create a temporary directory for downloads
+    temp_dir = os.path.join(os.path.dirname(__file__), "models")
+    os.makedirs(temp_dir, exist_ok=True)
     
-    # If model file not found, show error
-    if checkpoint_path is None:
-        st.error(f"Model file '{model_filename}' not found. Please upload the SAM model file.")
-        # Add file uploader for model
-        uploaded_model = st.file_uploader("Upload SAM model file (sam_vit_b_01ec64.pth)", type=["pth"])
-        if uploaded_model is not None:
-            # Save the uploaded model to a temporary file
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.pth') as tmp_file:
-                tmp_file.write(uploaded_model.getvalue())
-                checkpoint_path = tmp_file.name
-        else:
-            st.stop()
+    # Download destination
+    checkpoint_path = os.path.join(temp_dir, "sam_vit_b_01ec64.pth")
+    
+    # Download the model if it doesn't exist
+    checkpoint_path = download_model(model_url, checkpoint_path)
     
     # Load the model
-    model_type = "vit_b"
-    sam = sam_model_registry[model_type](checkpoint=checkpoint_path).to(device=device)
+    sam = sam_model_registry[model_type](checkpoint=checkpoint_path)
+    sam.to(device=device)
     mask_predictor = SamPredictor(sam)
     
     return mask_predictor, device
