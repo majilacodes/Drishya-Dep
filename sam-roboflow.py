@@ -8,6 +8,8 @@ from PIL import Image
 from segment_anything import sam_model_registry, SamPredictor
 import matplotlib.pyplot as plt
 from streamlit_drawable_canvas import st_canvas
+import base64
+from io import BytesIO
 
 # Set page configuration to wide layout
 st.set_page_config(
@@ -785,6 +787,3 @@ if uploaded_ad_file is not None:
 # Add footer
 st.markdown("---")
 st.markdown("Created with ❤️ using Streamlit and Meta's Segment Anything Model (SAM)")
-
-
-
