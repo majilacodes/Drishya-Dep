@@ -1,13 +1,13 @@
-import os
-import requests
 import streamlit as st
 import torch
-from segment_anything import sam_model_registry, SamPredictor
-from tqdm import tqdm
 import numpy as np
 import cv2
+import os
 import tempfile
+import requests
+from tqdm import tqdm
 from PIL import Image
+from segment_anything import sam_model_registry, SamPredictor
 import matplotlib.pyplot as plt
 from streamlit_drawable_canvas import st_canvas
 import base64
@@ -474,36 +474,34 @@ def replace_product_in_image(ad_image, new_product, mask, scale_factor=1.0, feat
     
     return output
 
-@st.cache_resource
-def download_model(url, dest):
-    """Download a file with progress bar if it doesn't exist"""
-    if os.path.exists(dest):
-        return dest
-    
-    # Create directory if it doesn't exist
-    os.makedirs(os.path.dirname(dest), exist_ok=True)
-    
-    # Download with progress bar
+def download_file(url, dest):
+    """
+    Download a file from url to destination with progress bar
+    """
     response = requests.get(url, stream=True)
-    total_size = int(response.headers.get('content-length', 0))
-    
-    # Show a Streamlit progress bar
-    progress_text = f"Downloading model from {url}"
+    total_size_in_bytes = int(response.headers.get('content-length', 0))
     progress_bar = st.progress(0)
+    progress_text = st.empty()
     
-    with open(dest, 'wb') as f:
-        downloaded = 0
-        for chunk in response.iter_content(chunk_size=1024*1024):
-            if chunk:
-                f.write(chunk)
-                downloaded += len(chunk)
-                # Update progress bar
-                if total_size:
-                    progress = int(100 * downloaded / total_size)
-                    progress_bar.progress(progress/100)
+    if total_size_in_bytes == 0:
+        progress_text.text(f"Downloading model file... (unknown size)")
+    else:
+        progress_text.text(f"Downloading model file... (0/{total_size_in_bytes/1024/1024:.1f} MB)")
     
-    # Clear progress bar after download
-    progress_bar.empty()
+    downloaded = 0
+    with open(dest, 'wb') as file:
+        for data in response.iter_content(chunk_size=4096):
+            file.write(data)
+            downloaded += len(data)
+            if total_size_in_bytes > 0:
+                progress = int(100 * downloaded / total_size_in_bytes)
+                progress_bar.progress(progress/100)
+                progress_text.text(f"Downloading model file... ({downloaded/1024/1024:.1f}/{total_size_in_bytes/1024/1024:.1f} MB)")
+            else:
+                progress_text.text(f"Downloading model file... ({downloaded/1024/1024:.1f} MB)")
+    
+    progress_bar.progress(100/100)
+    progress_text.text(f"Download complete! ({downloaded/1024/1024:.1f} MB)")
     return dest
 
 @st.cache_resource
@@ -512,23 +510,42 @@ def load_model():
     # Check if CUDA is available
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     
-    # Model type and URL
+    # Model info
+    model_filename = "sam_vit_b_01ec64.pth"
     model_type = "vit_b"
-    model_url = "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth"
     
-    # Create a temporary directory for downloads
-    temp_dir = os.path.join(os.path.dirname(__file__), "models")
-    os.makedirs(temp_dir, exist_ok=True)
+    # Create cache directory if it doesn't exist
+    cache_dir = os.path.join(tempfile.gettempdir(), "sam_model_cache")
+    os.makedirs(cache_dir, exist_ok=True)
     
-    # Download destination
-    checkpoint_path = os.path.join(temp_dir, "sam_vit_b_01ec64.pth")
+    # Path to the cached model file
+    model_path = os.path.join(cache_dir, model_filename)
     
-    # Download the model if it doesn't exist
-    checkpoint_path = download_model(model_url, checkpoint_path)
+    # Check if model already exists in cache
+    if not os.path.isfile(model_path):
+        st.info("Model not found in cache. Downloading now...")
+        
+        # Model URL (Meta's official release)
+        model_url = "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth"
+        
+        # Download the model with progress bar
+        try:
+            download_file(model_url, model_path)
+        except Exception as e:
+            st.error(f"Error downloading model: {e}")
+            # Add file uploader as fallback
+            uploaded_model = st.file_uploader("Upload SAM model file (sam_vit_b_01ec64.pth)", type=["pth"])
+            if uploaded_model is not None:
+                # Save the uploaded model
+                with open(model_path, 'wb') as f:
+                    f.write(uploaded_model.getvalue())
+            else:
+                st.stop()
+    else:
+        st.success("Model loaded from cache")
     
     # Load the model
-    sam = sam_model_registry[model_type](checkpoint=checkpoint_path)
-    sam.to(device=device)
+    sam = sam_model_registry[model_type](checkpoint=model_path).to(device=device)
     mask_predictor = SamPredictor(sam)
     
     return mask_predictor, device
